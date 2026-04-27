@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Vanilla WebGL Earth</title>
+    <style>
+        body { margin: 0; background-color: #000; overflow: hidden; }
+        canvas { width: 100vw; height: 100vh; display: block; }
+    </style>
+</head>
+<body>
+    <canvas id="glCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('glCanvas');
+        const gl = canvas.getContext('webgl');
+
+        // 1. 쉐이더 소스 (텍스처 지원)
+        const vsSource = `
+            attribute vec3 aPosition;
+            attribute vec2 aTexCoord;
+            attribute vec3 aNormal;
+            uniform mat4 uProjectionMatrix;
+            uniform mat4 uModelViewMatrix;
+            varying vec2 vTexCoord;
+            varying vec3 vNormal;
+            void main() {
+                gl_Position = uProjectionMatrix * uModelViewMatrix * vec4(aPosition, 1.0);
+                vTexCoord = aTexCoord;
+                vNormal = aNormal;
+            }
+        `;
+
+        const fsSource = `
+            precision mediump float;
+            varying vec2 vTexCoord;
+            varying vec3 vNormal;
+            uniform sampler2D uSampler;
+            void main() {
+                vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));
+                float brightness = max(dot(vNormal, lightDir), 0.2);
+                vec4 texColor = texture2D(uSampler, vTexCoord);
+                gl_FragColor = vec4(texColor.rgb * brightness, 1.0);
+            }
+        `;
+
+        function initShaderProgram(gl, vs, fs) {
+            const load = (t, s) => { const sh = gl.createShader(t); gl.shaderSource(sh, s); gl.compileShader(sh); return sh; };
+            const p = gl.createProgram();
+            gl.attachShader(p, load(gl.VERTEX_SHADER, vs));
+            gl.attachShader(p, load(gl.FRAGMENT_SHADER, fs));
+            gl.linkProgram(p);
+            return p;
+        }
+
+        const program = initShaderProgram(gl, vsSource, fsSource);
+        const locs = {
+            pos: gl.getAttribLocation(program, 'aPosition'),
+            tex: gl.getAttribLocation(program, 'aTexCoord'),
+            norm: gl.getAttribLocation(program, 'aNormal'),
+            proj: gl.getUniformLocation(program, 'uProjectionMatrix'),
+            mv: gl.getUniformLocation(program, 'uModelViewMatrix'),
+            sampler: gl.getUniformLocation(program, 'uSampler'),
+        };
+
+        // 2. 구 데이터 생성 (UV 좌표 추가)
+        function createSphere(radius, segments) {
+            const pos = [], uv = [], norm = [], idx = [];
+            for (let lat = 0; lat <= segments; lat++) {
+                const theta = lat * Math.PI / segments;
+                const sinT = Math.sin(theta), cosT = Math.cos(theta);
+                for (let lon = 0; lon <= segments; lon++) {
+                    const phi = lon * 2 * Math.PI / segments;
+                    const x = Math.cos(phi) * sinT, y = cosT, z = Math.sin(phi) * sinT;
+                    pos.push(radius * x, radius * y, radius * z);
+                    norm.push(x, y, z);
+                    uv.push(1 - (lon / segments), lat / segments); // UV 좌표
+                }
+            }
+            for (let lat = 0; lat < segments; lat++) {
+                for (let lon = 0; lon < segments; lon++) {
+                    const f = lat * (segments + 1) + lon, s = f + segments + 1;
+                    idx.push(f, s, f + 1, s, s + 1, f + 1);
+                }
+            }
+            return { pos, uv, norm, idx };
+        }
+
+        const sphere = createSphere(1.5, 40);
+
+        // 3. 버퍼 설정 함수
+        const makeBuffer = (data, type = gl.ARRAY_BUFFER) => {
+            const b = gl.createBuffer();
+            gl.bindBuffer(type, b);
+            gl.bufferData(type, data instanceof Array ? new Float32Array(data) : data, gl.STATIC_DRAW);
+            return b;
+        };
+
+        const posB = makeBuffer(sphere.pos);
+        const uvB = makeBuffer(sphere.uv);
+        const normB = makeBuffer(sphere.norm);
+        const idxB = makeBuffer(new Uint16Array(sphere.idx), gl.ELEMENT_ARRAY_BUFFER);
+
+        // 4. 텍스처 로딩
+        const texture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        // 이미지 로딩 전 임시 픽셀 (파란색)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 255, 255]));
+
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => {
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+            gl.generateMipmap(gl.TEXTURE_2D);
+        };
+        // 무료 지구 텍스처 소스
+        img.src = "IMG_8366.JPG";
+
+        function render(time) {
+            time *= 0.0005;
+            canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            gl.enable(gl.DEPTH_TEST);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+            const aspect = canvas.width / canvas.height;
+            const f = 1.0 / Math.tan((45 * Math.PI / 180) / 2);
+            const proj = [f/aspect,0,0,0, 0,f,0,0, 0,0,(100.1/-99.9),-1, 0,0,(20/-99.9),0];
+            
+            const s = Math.sin(time), c = Math.cos(time);
+            const mv = [c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,-5,1];
+
+            gl.useProgram(program);
+            
+            const bind = (loc, buf, size) => {
+                gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+                gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(loc);
+            };
+
+            bind(locs.pos, posB, 3);
+            bind(locs.tex, uvB, 2);
+            bind(locs.norm, normB, 3);
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxB);
+
+            gl.uniformMatrix4fv(locs.proj, false, proj);
+            gl.uniformMatrix4fv(locs.mv, false, mv);
+            
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.uniform1i(locs.sampler, 0);
+
+            gl.drawElements(gl.TRIANGLES, sphere.idx.length, gl.UNSIGNED_SHORT, 0);
+            requestAnimationFrame(render);
+        }
+        requestAnimationFrame(render);
+    </script>
+</body>
+</html>
